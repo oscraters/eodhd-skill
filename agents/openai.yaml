@@ -1,0 +1,4 @@
+interface:
+  display_name: "EODHD CLI"
+  short_description: "Plan and build an OpenClaw-safe EODHD CLI"
+  default_prompt: "Use $eodhd to plan or build a stateless Bash CLI for the EODHD API that follows OpenClaw secret management and logging standards."

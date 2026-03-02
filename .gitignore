@@ -1,0 +1,8 @@
+.env
+.env.*
+*.local
+*.tmp
+*.log
+.DS_Store
+coverage/
+dist/

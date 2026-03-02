@@ -65,11 +65,23 @@ cleanup_capture() {
 main() {
   mapfile -t result < <(run_capture "${CLI}" --help)
   assert_eq "0" "${result[0]}" "help exits zero"
-  assert_contains "$(cat "${result[1]}")" "Usage:" "help prints usage"
+  assert_contains "$(cat "${result[1]}")" "services" "help lists discovery"
+  assert_contains "$(cat "${result[1]}")" "live-v2" "help lists expanded command set"
   cleanup_capture "${result[1]}" "${result[2]}"
 
   mapfile -t result < <(run_capture "${CLI}")
   assert_eq "2" "${result[0]}" "no args exits usage"
+  cleanup_capture "${result[1]}" "${result[2]}"
+
+  mapfile -t result < <(run_capture "${CLI}" services)
+  assert_eq "0" "${result[0]}" "services exits zero"
+  assert_contains "$(cat "${result[1]}")" "\"service\":\"macro-indicator\"" "services includes macro-indicator"
+  assert_contains "$(cat "${result[1]}")" "\"service\":\"insider-transactions\"" "services includes insider-transactions"
+  cleanup_capture "${result[1]}" "${result[2]}"
+
+  mapfile -t result < <(run_capture "${CLI}" docs calendar)
+  assert_eq "0" "${result[0]}" "docs exits zero"
+  assert_contains "$(cat "${result[1]}")" "\"docs_url\":\"https://eodhd.com/financial-apis/calendar-upcoming-earnings-ipos-and-splits\"" "docs prints url"
   cleanup_capture "${result[1]}" "${result[2]}"
 
   mapfile -t result < <(run_capture "${CLI}" eod AAPL.US)
@@ -78,16 +90,39 @@ main() {
   cleanup_capture "${result[1]}" "${result[2]}"
 
   mapfile -t result < <(run_capture env EODHD_API_KEY=super-secret-token "${CLI}" --dry-run eod AAPL.US --from 2024-01-01 --query filter=last_close)
-  assert_eq "0" "${result[0]}" "dry run exits zero"
+  assert_eq "0" "${result[0]}" "eod dry run exits zero"
   assert_contains "$(cat "${result[1]}")" "***REDACTED***" "dry run masks token"
   assert_not_contains "$(cat "${result[1]}")" "super-secret-token" "dry run hides raw token"
-  assert_contains "$(cat "${result[1]}")" "AAPL.US" "dry run includes symbol"
+  assert_contains "$(cat "${result[1]}")" "/eod/AAPL.US?" "dry run includes eod path"
   cleanup_capture "${result[1]}" "${result[2]}"
 
   mapfile -t result < <(run_capture env EODHD_API_KEY=super-secret-token "${CLI}" --dry-run search "apple inc" --query limit=5)
   assert_eq "0" "${result[0]}" "search dry run exits zero"
   assert_contains "$(cat "${result[1]}")" "q=apple%20inc" "search encodes query"
-  assert_contains "$(cat "${result[1]}")" "limit=5" "search carries repeated query"
+  assert_contains "$(cat "${result[1]}")" "limit=5" "search carries arbitrary query"
+  cleanup_capture "${result[1]}" "${result[2]}"
+
+  mapfile -t result < <(run_capture env EODHD_API_KEY=super-secret-token "${CLI}" --dry-run live-v2 AAPL.US --interval 5m)
+  assert_eq "0" "${result[0]}" "live-v2 dry run exits zero"
+  assert_contains "$(cat "${result[1]}")" "/live/AAPL.US?" "live-v2 path"
+  assert_contains "$(cat "${result[1]}")" "interval=5m" "live-v2 interval"
+  cleanup_capture "${result[1]}" "${result[2]}"
+
+  mapfile -t result < <(run_capture env EODHD_API_KEY=super-secret-token "${CLI}" --dry-run calendar earnings --from 2025-01-01 --to 2025-01-31)
+  assert_eq "0" "${result[0]}" "calendar dry run exits zero"
+  assert_contains "$(cat "${result[1]}")" "/calendar?" "calendar path"
+  assert_contains "$(cat "${result[1]}")" "type=earnings" "calendar type"
+  cleanup_capture "${result[1]}" "${result[2]}"
+
+  mapfile -t result < <(run_capture env EODHD_API_KEY=super-secret-token "${CLI}" --dry-run macro-indicator USA --query indicator=gdp_current_usd)
+  assert_eq "0" "${result[0]}" "macro indicator dry run exits zero"
+  assert_contains "$(cat "${result[1]}")" "/macro-indicator/USA?" "macro path"
+  assert_contains "$(cat "${result[1]}")" "indicator=gdp_current_usd" "macro query"
+  cleanup_capture "${result[1]}" "${result[2]}"
+
+  mapfile -t result < <(run_capture env EODHD_API_KEY=super-secret-token "${CLI}" --dry-run exchange-symbols US --query delisted=0)
+  assert_eq "0" "${result[0]}" "exchange symbols dry run exits zero"
+  assert_contains "$(cat "${result[1]}")" "/exchange-symbol-list/US?" "exchange symbols path"
   cleanup_capture "${result[1]}" "${result[2]}"
 
   printf 'PASS: %s smoke tests\n' "${TESTS_RUN}"

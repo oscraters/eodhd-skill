@@ -4,7 +4,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-readonly EODHD_VERSION="0.1.0"
+readonly EODHD_VERSION="0.2.0"
 EODHD_BASE_URL="${EODHD_BASE_URL:-https://eodhd.com/api}"
 readonly EXIT_USAGE=2
 readonly EXIT_AUTH=3
@@ -15,53 +15,194 @@ VERBOSE=0
 DRY_RUN=0
 FORMAT="json"
 API_KEY_OVERRIDE=""
-REQUEST_PATH=""
 SUBCOMMAND=""
-SYMBOL=""
-SEARCH_QUERY=""
+REQUEST_PATH=""
+PRIMARY_ARG=""
+OPTIONAL_ARG=""
+PARSE_CONSUMED=0
 
 FROM_DATE=""
 TO_DATE=""
 PERIOD=""
 FILTER=""
 INTERVAL=""
-PARSE_CONSUMED=0
+LIMIT=""
+OFFSET=""
 
 declare -a EXTRA_QUERY_KEYS=()
 declare -a EXTRA_QUERY_VALUES=()
+
+declare -a SERVICE_ORDER=(
+  "services"
+  "docs"
+  "raw"
+  "eod"
+  "real-time"
+  "live"
+  "live-v2"
+  "intraday"
+  "ticks"
+  "dividends"
+  "splits"
+  "technical"
+  "fundamentals"
+  "bulk-last-day"
+  "search"
+  "exchanges"
+  "exchange-symbols"
+  "news"
+  "calendar"
+  "economic-events"
+  "macro-indicator"
+  "screener"
+  "delisted"
+  "insider-transactions"
+)
+
+service_description() {
+  case "$1" in
+    services) printf '%s' "List the documented EODHD service registry";;
+    docs) printf '%s' "Print the docs URL and metadata for a service";;
+    raw) printf '%s' "Request an arbitrary EODHD REST path";;
+    eod) printf '%s' "End-of-day OHLCV data for a symbol";;
+    real-time) printf '%s' "Real-time or delayed quote snapshot for a symbol";;
+    live) printf '%s' "Alias of real-time for docs compatibility";;
+    live-v2) printf '%s' "Live API v2 endpoint for a symbol";;
+    intraday) printf '%s' "Intraday bars for a symbol";;
+    ticks) printf '%s' "Tick data for a symbol";;
+    dividends) printf '%s' "Dividend history for a symbol";;
+    splits) printf '%s' "Split history for a symbol";;
+    technical) printf '%s' "Technical indicator endpoint for a symbol";;
+    fundamentals) printf '%s' "Fundamentals dataset for a symbol";;
+    bulk-last-day) printf '%s' "Bulk last trading day data for a market";;
+    search) printf '%s' "Symbol and issuer search";;
+    exchanges) printf '%s' "Exchange list";;
+    exchange-symbols) printf '%s' "Symbol list for an exchange";;
+    news) printf '%s' "Financial news API";;
+    calendar) printf '%s' "Calendar data such as earnings, IPOs, and splits";;
+    economic-events) printf '%s' "Economic events API";;
+    macro-indicator) printf '%s' "Macro indicator series for a country";;
+    screener) printf '%s' "Stock market screener";;
+    delisted) printf '%s' "Delisted symbols API";;
+    insider-transactions) printf '%s' "Insider transactions API";;
+    *) return 1;;
+  esac
+}
+
+service_docs_url() {
+  case "$1" in
+    services|docs|raw) printf '%s' "https://eodhd.com/financial-apis/";;
+    eod) printf '%s' "https://eodhd.com/financial-apis/api-for-historical-data-and-volumes";;
+    real-time|live) printf '%s' "https://eodhd.com/financial-apis/real-time-api";;
+    live-v2) printf '%s' "https://eodhd.com/financial-apis/live-stock-prices";;
+    intraday) printf '%s' "https://eodhd.com/financial-apis/intraday-historical-data-api";;
+    ticks) printf '%s' "https://eodhd.com/financial-apis/tick-data-historical-api";;
+    dividends|splits) printf '%s' "https://eodhd.com/financial-apis/api-splits-dividends/";;
+    technical) printf '%s' "https://eodhd.com/financial-apis/technical-indicators";;
+    fundamentals) printf '%s' "https://eodhd.com/financial-apis/stock-etfs-fundamental-data-feeds";;
+    bulk-last-day) printf '%s' "https://eodhd.com/financial-apis/bulk-api-eod-splits-dividends";;
+    search) printf '%s' "https://eodhd.com/financial-apis/search-api-for-stocks-etfs-mutual-funds";;
+    exchanges|exchange-symbols) printf '%s' "https://eodhd.com/financial-apis/list-supported-exchanges";;
+    news) printf '%s' "https://eodhd.com/financial-apis/stock-market-financial-news-api";;
+    calendar) printf '%s' "https://eodhd.com/financial-apis/calendar-upcoming-earnings-ipos-and-splits";;
+    economic-events) printf '%s' "https://eodhd.com/financial-apis/economic-events-data-api";;
+    macro-indicator) printf '%s' "https://eodhd.com/financial-apis/macroeconomics-data-and-reports-api";;
+    screener) printf '%s' "https://eodhd.com/financial-apis/stock-market-screener-api";;
+    delisted) printf '%s' "https://eodhd.com/financial-apis/delisted-stocks-api";;
+    insider-transactions) printf '%s' "https://eodhd.com/financial-apis/insider-transactions-api";;
+    *) return 1;;
+  esac
+}
+
+service_path_hint() {
+  case "$1" in
+    services|docs) printf '%s' "-";;
+    raw) printf '%s' "{path}";;
+    eod) printf '%s' "eod/{symbol}";;
+    real-time|live) printf '%s' "real-time/{symbol}";;
+    live-v2) printf '%s' "live/{symbol}";;
+    intraday) printf '%s' "intraday/{symbol}";;
+    ticks) printf '%s' "ticks/{symbol}";;
+    dividends) printf '%s' "div/{symbol}";;
+    splits) printf '%s' "splits/{symbol}";;
+    technical) printf '%s' "technical/{symbol}";;
+    fundamentals) printf '%s' "fundamentals/{symbol}";;
+    bulk-last-day) printf '%s' "bulk-last-day/{market}";;
+    search) printf '%s' "search?q={query}";;
+    exchanges) printf '%s' "exchanges-list";;
+    exchange-symbols) printf '%s' "exchange-symbol-list/{exchange}";;
+    news) printf '%s' "news";;
+    calendar) printf '%s' "calendar";;
+    economic-events) printf '%s' "economic-events";;
+    macro-indicator) printf '%s' "macro-indicator/{country}";;
+    screener) printf '%s' "screener";;
+    delisted) printf '%s' "delisted-symbols";;
+    insider-transactions) printf '%s' "insider-transactions";;
+    *) return 1;;
+  esac
+}
+
+service_requires_auth() {
+  case "$1" in
+    services|docs) return 1;;
+    *) return 0;;
+  esac
+}
 
 usage() {
   cat <<'EOF'
 Usage:
   eodhd [global-options] <command> [command-args] [command-options]
 
-Commands:
-  eod SYMBOL             Fetch end-of-day price data for a symbol
-  fundamentals SYMBOL    Fetch fundamentals data for a symbol
-  real-time SYMBOL       Fetch real-time quote data for a symbol
-  search QUERY           Search symbols or issuers
-  exchanges              List exchanges
-  raw PATH               Request an arbitrary EODHD API path
+Discovery:
+  services                    List documented service coverage and path hints
+  docs SERVICE                Print docs metadata for a service
+
+Core request commands:
+  raw PATH                    Request an arbitrary REST path
+  eod SYMBOL                  End-of-day OHLCV
+  real-time SYMBOL            Real-time or delayed quote snapshot
+  live SYMBOL                 Alias of real-time
+  live-v2 SYMBOL              Live API v2
+  intraday SYMBOL             Intraday bars
+  ticks SYMBOL                Tick data
+  dividends SYMBOL            Dividend history
+  splits SYMBOL               Split history
+  technical SYMBOL            Technical indicators
+  fundamentals SYMBOL         Fundamentals
+  bulk-last-day MARKET        Bulk last trading day data
+  search QUERY                Symbol search
+  exchanges                   Exchange list
+  exchange-symbols EXCHANGE   Symbols for an exchange
+  news                        Financial news
+  calendar TYPE               Calendar API, e.g. earnings, ipo, splits
+  economic-events             Economic events
+  macro-indicator COUNTRY     Macro indicators, e.g. USA
+  screener                    Screener API
+  delisted                    Delisted symbols
+  insider-transactions        Insider transactions
 
 Global options:
-  --api-key VALUE        Override EODHD_API_KEY for this invocation only
-  --base-url URL         Override API base URL
-  --fmt VALUE            Response format, default: json
-  --query KEY=VALUE      Append an arbitrary query parameter (repeatable)
-  --verbose              Print safe diagnostics to stderr
-  --dry-run              Print the sanitized request and exit without sending it
-  --help                 Show this help text
-  --version              Show CLI version
+  --api-key VALUE             Override EODHD_API_KEY for this invocation only
+  --base-url URL              Override API base URL
+  --fmt VALUE                 Response format, default: json
+  --query KEY=VALUE           Append an arbitrary query parameter (repeatable)
+  --verbose                   Print safe diagnostics to stderr
+  --dry-run                   Print the sanitized request and exit
+  --help                      Show this help text
+  --version                   Show CLI version
 
-Common command options:
+Common request options:
   --from YYYY-MM-DD
   --to YYYY-MM-DD
   --period VALUE
   --filter VALUE
   --interval VALUE
+  --limit VALUE
+  --offset VALUE
 
 Environment:
-  EODHD_API_KEY          Preferred auth source for OpenClaw-managed secrets
+  EODHD_API_KEY               Preferred auth source for OpenClaw-managed secrets
 EOF
 }
 
@@ -238,6 +379,18 @@ parse_command_option() {
       PARSE_CONSUMED=2
       return 0
       ;;
+    --limit)
+      require_value "${option}" "${value}"
+      LIMIT="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --offset)
+      require_value "${option}" "${value}"
+      OFFSET="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
     --fmt|--query|--api-key|--base-url|--verbose|--dry-run|--help|--version)
       parse_global_option "${option}" "${value}"
       return $?
@@ -248,68 +401,42 @@ parse_command_option() {
   esac
 }
 
-build_url() {
-  local path="$1"
-  local api_key
-  local url="${EODHD_BASE_URL%/}/${path#/}"
-  local separator='?'
-  local i key value
-
-  api_key="$(effective_api_key)"
-  url+="${separator}api_token=$(urlencode "${api_key}")"
-  separator='&'
-  url+="${separator}fmt=$(urlencode "${FORMAT}")"
-
-  if [[ -n "${FROM_DATE}" ]]; then
-    url+="&from=$(urlencode "${FROM_DATE}")"
-  fi
-  if [[ -n "${TO_DATE}" ]]; then
-    url+="&to=$(urlencode "${TO_DATE}")"
-  fi
-  if [[ -n "${PERIOD}" ]]; then
-    url+="&period=$(urlencode "${PERIOD}")"
-  fi
-  if [[ -n "${FILTER}" ]]; then
-    url+="&filter=$(urlencode "${FILTER}")"
-  fi
-  if [[ -n "${INTERVAL}" ]]; then
-    url+="&interval=$(urlencode "${INTERVAL}")"
-  fi
-
-  for ((i = 0; i < ${#EXTRA_QUERY_KEYS[@]}; i += 1)); do
-    key="${EXTRA_QUERY_KEYS[i]}"
-    value="${EXTRA_QUERY_VALUES[i]}"
-    url+="&$(urlencode "${key}")=$(urlencode "${value}")"
-  done
-
-  printf '%s' "${url}"
-}
-
-set_command_defaults() {
-  case "${SUBCOMMAND}" in
-    eod)
-      REQUEST_PATH="eod/${SYMBOL}"
-      ;;
-    fundamentals)
-      REQUEST_PATH="fundamentals/${SYMBOL}"
-      ;;
-    real-time)
-      REQUEST_PATH="real-time/${SYMBOL}"
-      ;;
-    search)
-      REQUEST_PATH="search"
-      append_query_param "q" "${SEARCH_QUERY}"
-      ;;
-    exchanges)
-      REQUEST_PATH="exchanges-list"
-      ;;
-    raw)
-      REQUEST_PATH="${REQUEST_PATH}"
+requires_primary_arg() {
+  case "$1" in
+    raw|eod|real-time|live|live-v2|intraday|ticks|dividends|splits|technical|fundamentals|bulk-last-day|search|exchange-symbols|calendar|macro-indicator|docs)
+      return 0
       ;;
     *)
-      die "${EXIT_USAGE}" "unknown command: ${SUBCOMMAND}"
+      return 1
       ;;
   esac
+}
+
+parse_command() {
+  case "${1}" in
+    services|exchanges|news|economic-events|screener|delisted|insider-transactions)
+      SUBCOMMAND="${1}"
+      shift
+      ;;
+    raw|eod|real-time|live|live-v2|intraday|ticks|dividends|splits|technical|fundamentals|bulk-last-day|search|exchange-symbols|calendar|macro-indicator|docs)
+      SUBCOMMAND="${1}"
+      shift
+      [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "${SUBCOMMAND} requires an argument"
+      PRIMARY_ARG="${1}"
+      shift
+      ;;
+    *)
+      die "${EXIT_USAGE}" "unknown option or command: ${1}"
+      ;;
+  esac
+
+  while [[ "$#" -gt 0 ]]; do
+    if parse_command_option "${1}" "${2:-}"; then
+      shift "${PARSE_CONSUMED}"
+      continue
+    fi
+    die "${EXIT_USAGE}" "unknown option: ${1}"
+  done
 }
 
 parse_args() {
@@ -328,45 +455,171 @@ parse_args() {
       continue
     fi
 
-    case "${1}" in
-      eod|fundamentals|real-time)
-        SUBCOMMAND="${1}"
-        shift
-        [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "${SUBCOMMAND} requires SYMBOL"
-        SYMBOL="${1}"
-        shift
-        ;;
-      search)
-        SUBCOMMAND="${1}"
-        shift
-        [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "search requires QUERY"
-        SEARCH_QUERY="${1}"
-        shift
-        ;;
-      exchanges)
-        SUBCOMMAND="${1}"
-        shift
-        ;;
-      raw)
-        SUBCOMMAND="${1}"
-        shift
-        [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "raw requires PATH"
-        REQUEST_PATH="${1}"
-        shift
-        ;;
-      *)
-        die "${EXIT_USAGE}" "unknown option or command: ${1}"
-        ;;
-    esac
+    parse_command "$@"
+    break
+  done
+}
+
+build_url() {
+  local path="$1"
+  local api_key
+  local url="${EODHD_BASE_URL%/}/${path#/}"
+  local i key value
+
+  api_key="$(effective_api_key)"
+  url+="?api_token=$(urlencode "${api_key}")"
+  url+="&fmt=$(urlencode "${FORMAT}")"
+
+  if [[ -n "${FROM_DATE}" ]]; then
+    url+="&from=$(urlencode "${FROM_DATE}")"
+  fi
+  if [[ -n "${TO_DATE}" ]]; then
+    url+="&to=$(urlencode "${TO_DATE}")"
+  fi
+  if [[ -n "${PERIOD}" ]]; then
+    url+="&period=$(urlencode "${PERIOD}")"
+  fi
+  if [[ -n "${FILTER}" ]]; then
+    url+="&filter=$(urlencode "${FILTER}")"
+  fi
+  if [[ -n "${INTERVAL}" ]]; then
+    url+="&interval=$(urlencode "${INTERVAL}")"
+  fi
+  if [[ -n "${LIMIT}" ]]; then
+    url+="&limit=$(urlencode "${LIMIT}")"
+  fi
+  if [[ -n "${OFFSET}" ]]; then
+    url+="&offset=$(urlencode "${OFFSET}")"
+  fi
+
+  for ((i = 0; i < ${#EXTRA_QUERY_KEYS[@]}; i += 1)); do
+    key="${EXTRA_QUERY_KEYS[i]}"
+    value="${EXTRA_QUERY_VALUES[i]}"
+    url+="&$(urlencode "${key}")=$(urlencode "${value}")"
   done
 
-  while [[ "$#" -gt 0 ]]; do
-    if parse_command_option "${1}" "${2:-}"; then
-      shift "${PARSE_CONSUMED}"
-      continue
-    fi
-    die "${EXIT_USAGE}" "unknown option: ${1}"
+  printf '%s' "${url}"
+}
+
+print_services() {
+  local service docs path description
+  if [[ "${FORMAT}" == "json" ]]; then
+    printf '[\n'
+    local first=1
+    for service in "${SERVICE_ORDER[@]}"; do
+      docs="$(service_docs_url "${service}")"
+      path="$(service_path_hint "${service}")"
+      description="$(service_description "${service}")"
+      if [[ "${first}" -eq 0 ]]; then
+        printf ',\n'
+      fi
+      first=0
+      printf '  {"service":"%s","path_hint":"%s","docs_url":"%s","description":"%s"}' \
+        "${service}" "${path}" "${docs}" "${description}"
+    done
+    printf '\n]\n'
+    return
+  fi
+
+  printf 'SERVICE\tPATH\tDOCS\n'
+  for service in "${SERVICE_ORDER[@]}"; do
+    printf '%s\t%s\t%s\n' \
+      "${service}" \
+      "$(service_path_hint "${service}")" \
+      "$(service_docs_url "${service}")"
   done
+}
+
+print_service_docs() {
+  local service="$1"
+  service_description "${service}" >/dev/null || die "${EXIT_USAGE}" "unknown service for docs: ${service}"
+
+  if [[ "${FORMAT}" == "json" ]]; then
+    printf '{"service":"%s","path_hint":"%s","docs_url":"%s","description":"%s"}\n' \
+      "${service}" \
+      "$(service_path_hint "${service}")" \
+      "$(service_docs_url "${service}")" \
+      "$(service_description "${service}")"
+    return
+  fi
+
+  printf 'service: %s\n' "${service}"
+  printf 'path_hint: %s\n' "$(service_path_hint "${service}")"
+  printf 'docs_url: %s\n' "$(service_docs_url "${service}")"
+  printf 'description: %s\n' "$(service_description "${service}")"
+}
+
+set_request_defaults() {
+  case "${SUBCOMMAND}" in
+    raw)
+      REQUEST_PATH="${PRIMARY_ARG}"
+      ;;
+    eod)
+      REQUEST_PATH="eod/${PRIMARY_ARG}"
+      ;;
+    real-time|live)
+      REQUEST_PATH="real-time/${PRIMARY_ARG}"
+      ;;
+    live-v2)
+      REQUEST_PATH="live/${PRIMARY_ARG}"
+      ;;
+    intraday)
+      REQUEST_PATH="intraday/${PRIMARY_ARG}"
+      ;;
+    ticks)
+      REQUEST_PATH="ticks/${PRIMARY_ARG}"
+      ;;
+    dividends)
+      REQUEST_PATH="div/${PRIMARY_ARG}"
+      ;;
+    splits)
+      REQUEST_PATH="splits/${PRIMARY_ARG}"
+      ;;
+    technical)
+      REQUEST_PATH="technical/${PRIMARY_ARG}"
+      ;;
+    fundamentals)
+      REQUEST_PATH="fundamentals/${PRIMARY_ARG}"
+      ;;
+    bulk-last-day)
+      REQUEST_PATH="bulk-last-day/${PRIMARY_ARG}"
+      ;;
+    search)
+      REQUEST_PATH="search"
+      append_query_param "q" "${PRIMARY_ARG}"
+      ;;
+    exchanges)
+      REQUEST_PATH="exchanges-list"
+      ;;
+    exchange-symbols)
+      REQUEST_PATH="exchange-symbol-list/${PRIMARY_ARG}"
+      ;;
+    news)
+      REQUEST_PATH="news"
+      ;;
+    calendar)
+      REQUEST_PATH="calendar"
+      append_query_param "type" "${PRIMARY_ARG}"
+      ;;
+    economic-events)
+      REQUEST_PATH="economic-events"
+      ;;
+    macro-indicator)
+      REQUEST_PATH="macro-indicator/${PRIMARY_ARG}"
+      ;;
+    screener)
+      REQUEST_PATH="screener"
+      ;;
+    delisted)
+      REQUEST_PATH="delisted-symbols"
+      ;;
+    insider-transactions)
+      REQUEST_PATH="insider-transactions"
+      ;;
+    *)
+      die "${EXIT_USAGE}" "unknown command: ${SUBCOMMAND}"
+      ;;
+  esac
 }
 
 perform_request() {
@@ -400,8 +653,24 @@ perform_request() {
 
 main() {
   parse_args "$@"
-  require_api_key
-  set_command_defaults
+
+  case "${SUBCOMMAND}" in
+    services)
+      print_services
+      return 0
+      ;;
+    docs)
+      print_service_docs "${PRIMARY_ARG}"
+      return 0
+      ;;
+  esac
+
+  service_description "${SUBCOMMAND}" >/dev/null || die "${EXIT_USAGE}" "unknown command: ${SUBCOMMAND}"
+  if service_requires_auth "${SUBCOMMAND}"; then
+    require_api_key
+  fi
+
+  set_request_defaults
 
   local url
   url="$(build_url "${REQUEST_PATH}")"

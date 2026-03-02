@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+readonly EODHD_VERSION="0.1.0"
+EODHD_BASE_URL="${EODHD_BASE_URL:-https://eodhd.com/api}"
+readonly EXIT_USAGE=2
+readonly EXIT_AUTH=3
+readonly EXIT_HTTP=4
+readonly EXIT_PARSE=5
+
+VERBOSE=0
+DRY_RUN=0
+FORMAT="json"
+API_KEY_OVERRIDE=""
+REQUEST_PATH=""
+SUBCOMMAND=""
+SYMBOL=""
+SEARCH_QUERY=""
+
+FROM_DATE=""
+TO_DATE=""
+PERIOD=""
+FILTER=""
+INTERVAL=""
+PARSE_CONSUMED=0
+
+declare -a EXTRA_QUERY_KEYS=()
+declare -a EXTRA_QUERY_VALUES=()
+
+usage() {
+  cat <<'EOF'
+Usage:
+  eodhd [global-options] <command> [command-args] [command-options]
+
+Commands:
+  eod SYMBOL             Fetch end-of-day price data for a symbol
+  fundamentals SYMBOL    Fetch fundamentals data for a symbol
+  real-time SYMBOL       Fetch real-time quote data for a symbol
+  search QUERY           Search symbols or issuers
+  exchanges              List exchanges
+  raw PATH               Request an arbitrary EODHD API path
+
+Global options:
+  --api-key VALUE        Override EODHD_API_KEY for this invocation only
+  --base-url URL         Override API base URL
+  --fmt VALUE            Response format, default: json
+  --query KEY=VALUE      Append an arbitrary query parameter (repeatable)
+  --verbose              Print safe diagnostics to stderr
+  --dry-run              Print the sanitized request and exit without sending it
+  --help                 Show this help text
+  --version              Show CLI version
+
+Common command options:
+  --from YYYY-MM-DD
+  --to YYYY-MM-DD
+  --period VALUE
+  --filter VALUE
+  --interval VALUE
+
+Environment:
+  EODHD_API_KEY          Preferred auth source for OpenClaw-managed secrets
+EOF
+}
+
+die() {
+  local exit_code="$1"
+  shift
+  printf 'error: %s\n' "$(redact_sensitive_text "$*")" >&2
+  exit "${exit_code}"
+}
+
+urlencode() {
+  local input="${1:-}"
+  local output=""
+  local length="${#input}"
+  local i char hex
+  for ((i = 0; i < length; i += 1)); do
+    char="${input:i:1}"
+    case "${char}" in
+      [a-zA-Z0-9.~_-])
+        output+="${char}"
+        ;;
+      *)
+        printf -v hex '%%%02X' "'${char}"
+        output+="${hex}"
+        ;;
+    esac
+  done
+  printf '%s' "${output}"
+}
+
+redact_sensitive_text() {
+  local text="${1:-}"
+  local token="${API_KEY_OVERRIDE:-${EODHD_API_KEY:-}}"
+  local redacted="${text}"
+
+  if [[ -n "${token}" ]]; then
+    redacted="${redacted//${token}/***REDACTED***}"
+  fi
+
+  redacted="$(printf '%s' "${redacted}" | sed -E \
+    -e 's/(api_token=)[^&[:space:]]+/\1***REDACTED***/g' \
+    -e 's/(Authorization: Bearer )[^\r\n[:space:]]+/\1***REDACTED***/g')"
+
+  printf '%s' "${redacted}"
+}
+
+log_verbose() {
+  if [[ "${VERBOSE}" -eq 1 ]]; then
+    printf '%s\n' "$(redact_sensitive_text "$*")" >&2
+  fi
+}
+
+append_query_param() {
+  local key="$1"
+  local value="$2"
+  EXTRA_QUERY_KEYS+=("${key}")
+  EXTRA_QUERY_VALUES+=("${value}")
+}
+
+require_value() {
+  local flag="$1"
+  local value="${2:-}"
+  if [[ -z "${value}" ]]; then
+    die "${EXIT_USAGE}" "missing value for ${flag}"
+  fi
+}
+
+require_api_key() {
+  if [[ -n "${API_KEY_OVERRIDE}" ]]; then
+    return
+  fi
+
+  if [[ -z "${EODHD_API_KEY:-}" ]]; then
+    die "${EXIT_AUTH}" "EODHD_API_KEY is required or pass --api-key"
+  fi
+}
+
+effective_api_key() {
+  if [[ -n "${API_KEY_OVERRIDE}" ]]; then
+    printf '%s' "${API_KEY_OVERRIDE}"
+    return
+  fi
+  printf '%s' "${EODHD_API_KEY:-}"
+}
+
+parse_global_option() {
+  local option="$1"
+  local value="${2:-}"
+  PARSE_CONSUMED=0
+  case "${option}" in
+    --api-key)
+      require_value "${option}" "${value}"
+      API_KEY_OVERRIDE="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --base-url)
+      require_value "${option}" "${value}"
+      EODHD_BASE_URL="${value%/}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --fmt)
+      require_value "${option}" "${value}"
+      FORMAT="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --query)
+      require_value "${option}" "${value}"
+      if [[ "${value}" != *=* ]]; then
+        die "${EXIT_USAGE}" "--query expects KEY=VALUE"
+      fi
+      append_query_param "${value%%=*}" "${value#*=}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --verbose)
+      VERBOSE=1
+      PARSE_CONSUMED=1
+      return 0
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      PARSE_CONSUMED=1
+      return 0
+      ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    --version)
+      printf '%s\n' "${EODHD_VERSION}"
+      exit 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+parse_command_option() {
+  local option="$1"
+  local value="${2:-}"
+  PARSE_CONSUMED=0
+  case "${option}" in
+    --from)
+      require_value "${option}" "${value}"
+      FROM_DATE="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --to)
+      require_value "${option}" "${value}"
+      TO_DATE="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --period)
+      require_value "${option}" "${value}"
+      PERIOD="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --filter)
+      require_value "${option}" "${value}"
+      FILTER="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --interval)
+      require_value "${option}" "${value}"
+      INTERVAL="${value}"
+      PARSE_CONSUMED=2
+      return 0
+      ;;
+    --fmt|--query|--api-key|--base-url|--verbose|--dry-run|--help|--version)
+      parse_global_option "${option}" "${value}"
+      return $?
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+build_url() {
+  local path="$1"
+  local api_key
+  local url="${EODHD_BASE_URL%/}/${path#/}"
+  local separator='?'
+  local i key value
+
+  api_key="$(effective_api_key)"
+  url+="${separator}api_token=$(urlencode "${api_key}")"
+  separator='&'
+  url+="${separator}fmt=$(urlencode "${FORMAT}")"
+
+  if [[ -n "${FROM_DATE}" ]]; then
+    url+="&from=$(urlencode "${FROM_DATE}")"
+  fi
+  if [[ -n "${TO_DATE}" ]]; then
+    url+="&to=$(urlencode "${TO_DATE}")"
+  fi
+  if [[ -n "${PERIOD}" ]]; then
+    url+="&period=$(urlencode "${PERIOD}")"
+  fi
+  if [[ -n "${FILTER}" ]]; then
+    url+="&filter=$(urlencode "${FILTER}")"
+  fi
+  if [[ -n "${INTERVAL}" ]]; then
+    url+="&interval=$(urlencode "${INTERVAL}")"
+  fi
+
+  for ((i = 0; i < ${#EXTRA_QUERY_KEYS[@]}; i += 1)); do
+    key="${EXTRA_QUERY_KEYS[i]}"
+    value="${EXTRA_QUERY_VALUES[i]}"
+    url+="&$(urlencode "${key}")=$(urlencode "${value}")"
+  done
+
+  printf '%s' "${url}"
+}
+
+set_command_defaults() {
+  case "${SUBCOMMAND}" in
+    eod)
+      REQUEST_PATH="eod/${SYMBOL}"
+      ;;
+    fundamentals)
+      REQUEST_PATH="fundamentals/${SYMBOL}"
+      ;;
+    real-time)
+      REQUEST_PATH="real-time/${SYMBOL}"
+      ;;
+    search)
+      REQUEST_PATH="search"
+      append_query_param "q" "${SEARCH_QUERY}"
+      ;;
+    exchanges)
+      REQUEST_PATH="exchanges-list"
+      ;;
+    raw)
+      REQUEST_PATH="${REQUEST_PATH}"
+      ;;
+    *)
+      die "${EXIT_USAGE}" "unknown command: ${SUBCOMMAND}"
+      ;;
+  esac
+}
+
+parse_args() {
+  if [[ "$#" -eq 0 ]]; then
+    usage >&2
+    exit "${EXIT_USAGE}"
+  fi
+
+  while [[ "$#" -gt 0 ]]; do
+    if [[ -n "${SUBCOMMAND}" ]]; then
+      break
+    fi
+
+    if parse_global_option "${1}" "${2:-}"; then
+      shift "${PARSE_CONSUMED}"
+      continue
+    fi
+
+    case "${1}" in
+      eod|fundamentals|real-time)
+        SUBCOMMAND="${1}"
+        shift
+        [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "${SUBCOMMAND} requires SYMBOL"
+        SYMBOL="${1}"
+        shift
+        ;;
+      search)
+        SUBCOMMAND="${1}"
+        shift
+        [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "search requires QUERY"
+        SEARCH_QUERY="${1}"
+        shift
+        ;;
+      exchanges)
+        SUBCOMMAND="${1}"
+        shift
+        ;;
+      raw)
+        SUBCOMMAND="${1}"
+        shift
+        [[ "$#" -gt 0 ]] || die "${EXIT_USAGE}" "raw requires PATH"
+        REQUEST_PATH="${1}"
+        shift
+        ;;
+      *)
+        die "${EXIT_USAGE}" "unknown option or command: ${1}"
+        ;;
+    esac
+  done
+
+  while [[ "$#" -gt 0 ]]; do
+    if parse_command_option "${1}" "${2:-}"; then
+      shift "${PARSE_CONSUMED}"
+      continue
+    fi
+    die "${EXIT_USAGE}" "unknown option: ${1}"
+  done
+}
+
+perform_request() {
+  local url="$1"
+  local body_file status
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    printf '%s\n' "$(redact_sensitive_text "${url}")"
+    return 0
+  fi
+
+  body_file="$(mktemp)"
+  status="$(curl --silent --show-error --location \
+    --output "${body_file}" \
+    --write-out '%{http_code}' \
+    "${url}")" || {
+      rm -f "${body_file}"
+      die "${EXIT_HTTP}" "request failed for $(redact_sensitive_text "${url}")"
+    }
+
+  if [[ "${status}" -lt 200 || "${status}" -ge 300 ]]; then
+    local response
+    response="$(cat "${body_file}")"
+    rm -f "${body_file}"
+    die "${EXIT_HTTP}" "HTTP ${status}: ${response}"
+  fi
+
+  cat "${body_file}"
+  rm -f "${body_file}"
+}
+
+main() {
+  parse_args "$@"
+  require_api_key
+  set_command_defaults
+
+  local url
+  url="$(build_url "${REQUEST_PATH}")"
+  log_verbose "request=$(redact_sensitive_text "${url}")"
+  perform_request "${url}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

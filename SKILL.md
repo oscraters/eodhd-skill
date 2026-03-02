@@ -26,6 +26,7 @@ Build the wrapper as a small, stateless Bash CLI that translates stable subcomma
    - Expect `EODHD_API_KEY` to be injected by OpenClaw.
    - Allow a one-shot explicit override like `--api-key` only if the user asks for it or the implementation already exposes it.
    - Do not read plaintext secrets from repo files, sample configs, shell history helpers, or generated artifacts.
+   - Keep the publish metadata aligned with that contract by declaring `EODHD_API_KEY` as the primary required credential.
 
 4. Enforce redaction and logging hygiene.
    - Never print the raw API key to stdout or stderr.
@@ -42,6 +43,7 @@ Build the wrapper as a small, stateless Bash CLI that translates stable subcomma
    - Assume the repo is public.
    - Use only public EODHD docs and public sample symbols in examples.
    - Avoid local-machine assumptions, personal data, or environment-specific artifacts.
+   - Verify the release bundle contains `scripts/eodhd` and the metadata that declares it.
 
 ## Implementation Rules
 
@@ -54,6 +56,7 @@ Build the wrapper as a small, stateless Bash CLI that translates stable subcomma
 ## Deliverables
 
 - `scripts/eodhd` for the CLI entrypoint when implementation starts
+- `scripts/check-package.sh` for package and manifest consistency checks
 - `references/implementation-plan.md` for milestones and acceptance criteria
 - `references/openclaw-secrets.md` for secret and logging constraints
 - `agents/openai.yaml` for Clawhub/OpenAI-facing metadata
@@ -63,4 +66,5 @@ Build the wrapper as a small, stateless Bash CLI that translates stable subcomma
 - Check that examples never expose a real token.
 - Check that debug or dry-run output replaces token values with a fixed mask such as `***REDACTED***`.
 - Check that auth failure, HTTP failure, and usage failure produce distinct exit codes or clearly distinct stderr messages.
+- Check that the manifest declares `EODHD_API_KEY` and includes `scripts/eodhd` in the packaged files.
 - Check that the repo contains no `.env`, token snapshots, or generated local artifacts.
